@@ -1,0 +1,11 @@
+[project]
+name = "tradutor-offline"
+version = "0.1.0"
+description = "Tradutor de inglês para português usando transformers"
+requires-python = ">=3.9"
+dependencies = [
+    "transformers>=4.30.0",
+    "torch>=2.0.0",
+    "sentencepiece>=0.1.99",
+    "sacremoses>=0.0.53",
+]
