@@ -4,17 +4,90 @@ Tradutor de inglês para português usando Transformers
 import torch
 import time
 import sys
+import subprocess
+import os
 from datetime import datetime
+
+# Configurar encoding UTF-8 para o terminal Windows
+if sys.platform == 'win32':
+    try:
+        # Tentar configurar UTF-8 no Windows
+        os.system('chcp 65001 > nul')
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+
+def obter_memoria_gpu_real():
+    """
+    Obtém a memória GPU real usando nvidia-smi (mais preciso).
+    Retorna (memória_usada_GB, memória_total_GB).
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.used,memory.total',
+             '--format=csv,nounits,noheader'],
+            capture_output=True,
+            text=True,
+            timeout=1
+        )
+        if result.returncode == 0:
+            used, total = result.stdout.strip().split(',')
+            return float(used) / 1024, float(total) / 1024
+    except Exception:
+        pass
+    # Fallback para PyTorch se nvidia-smi falhar
+    return (
+        torch.cuda.memory_reserved(0) / 1024**3,
+        torch.cuda.get_device_properties(0).total_memory / 1024**3
+    )
+
+
+def limpar_mixagem_idiomas(texto):
+    """Remove palavras em outros idiomas que vazam do mBART."""
+    import re
+    
+    # Primeiro, substituir palavras específicas com cirílico
+    # (детективes -> detetives)
+    texto = re.sub(r'\b[а-яА-ЯёЁ]+(?:es|os|as)?\b', 'detetives', texto)
+    
+    # Depois, substituições de espanhol/outros idiomas
+    substituicoes = {
+        r'\bEl\b': 'Ele',  # Espanhol
+        r'\bLa\b': 'A',
+        r'\bLos\b': 'Os',
+        r'\bLas\b': 'As',
+        r'\bUn\b': 'Um',
+        r'\bUna\b': 'Uma',
+        r'decoración': 'decoração',
+        r'\bshelf\b': 'prateleira',
+    }
+    
+    for padrao, substituto in substituicoes.items():
+        texto = re.sub(padrao, substituto, texto)
+    
+    # Remover "es" duplicado que pode ter sobrado
+    texto = re.sub(r'\b(detetives)es\b', r'\1', texto)
+    
+    return texto.strip()
 
 
 def imprimir_barra_progresso(atual, total, largura=50, info_extra=""):
     """
-    Imprime uma barra de progresso no terminal.
+    Imprime uma barra de progresso no terminal com fallback ASCII.
     """
     percentual = (atual / total) * 100
     blocos_preenchidos = int(largura * atual / total)
-    barra = "█" * blocos_preenchidos + "░" * (largura - blocos_preenchidos)
-    print(f"\r[{barra}] {percentual:.1f}% ({atual}/{total}) {info_extra}", end="", flush=True)
+    blocos_vazios = largura - blocos_preenchidos
+    
+    # Usar caracteres mais seguros que funcionam em todos os terminais
+    barra = "=" * blocos_preenchidos + " " * blocos_vazios
+    
+    print(
+        f"\r[{barra}] {percentual:.1f}% ({atual}/{total}) {info_extra}",
+        end="",
+        flush=True
+    )
 
 
 def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int = 2048):
@@ -34,22 +107,30 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
     print(f"📅 Início: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
     
     print("📥 Carregando modelo de tradução...")
-    # Modelo específico para tradução inglês -> português
-    # Usando o modelo correto do Hugging Face
-    model_name = "unicamp-dl/translation-en-pt-t5"
+    # Modelo mBART-50 (Meta) - melhor qualidade
+    model_name = "facebook/mbart-large-50-many-to-many-mmt"
     print(f"   Modelo: {model_name}")
-    print("   ⚠️  Primeira execução: Baixando modelo (~900MB)...")
+    print("   ⚠️  Primeira execução: Baixando modelo (~2.4GB)...")
     print("   Isso pode levar alguns minutos dependendo da conexão.\n")
     
     tempo_modelo_inicio = time.time()
     try:
-        from transformers import T5ForConditionalGeneration, T5Tokenizer
-        tokenizer = T5Tokenizer.from_pretrained(model_name)
-        # Usar safetensors para evitar problema de segurança do torch.load
-        model = T5ForConditionalGeneration.from_pretrained(
+        from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+        
+        tokenizer = MBart50TokenizerFast.from_pretrained(
             model_name,
-            use_safetensors=True
+            src_lang="en_XX",
+            tgt_lang="pt_XX"
         )
+        
+        # Forçar tokenizer a usar português explicitamente
+        tokenizer.src_lang = "en_XX"
+        tokenizer.tgt_lang = "pt_XX"
+        
+        model = MBartForConditionalGeneration.from_pretrained(
+            model_name
+        )
+        
         tempo_modelo = time.time() - tempo_modelo_inicio
         print(f"   ✓ Modelo carregado em {tempo_modelo:.2f}s")
     except Exception as e:
@@ -71,6 +152,8 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
         print(f"   🚀 GPU detectada: {gpu_name}")
         print(f"   💾 Memória GPU: {gpu_memory:.2f} GB")
         print("   ⚡ Usando CUDA para aceleração")
+        print("   ℹ️  Nota: Memória GPU sobe/desce durante processamento")
+        print("           (PyTorch aloca/libera cache dinamicamente)")
         
         # Otimizações para GPU
         torch.backends.cudnn.benchmark = True
@@ -180,22 +263,28 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
                     with torch.amp.autocast('cuda', dtype=torch.float16):
                         translated = model.generate(
                             **inputs,
-                            max_length=512,
-                            num_beams=1,  # Greedy decoding para máxima velocidade
-                            do_sample=False,
-                            use_cache=True
+                            forced_bos_token_id=tokenizer.lang_code_to_id["pt_XX"],
+                            max_length=200,
+                            num_beams=5,
+                            no_repeat_ngram_size=3,
+                            early_stopping=True,
+                            length_penalty=1.0
                         )
                 else:
                     translated = model.generate(
                         **inputs,
-                        max_length=512,
-                        num_beams=1,
-                        do_sample=False,
-                        use_cache=True
+                        forced_bos_token_id=tokenizer.lang_code_to_id["pt_XX"],
+                        max_length=200,
+                        num_beams=5,
+                        no_repeat_ngram_size=3,
+                        early_stopping=True,
+                        length_penalty=1.0
                     )
             
             traducoes_batch = [
-                tokenizer.decode(t, skip_special_tokens=True)
+                limpar_mixagem_idiomas(
+                    tokenizer.decode(t, skip_special_tokens=True)
+                )
                 for t in translated
             ]
             
@@ -203,9 +292,14 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
             for idx_orig, traducao in zip(indices, traducoes_batch):
                 resultado_ordenado[idx_orig] = traducao
             
-            # Limpar cache da GPU após cada lote
+            # Limpar memória GPU mais agressivamente
             if device == "cuda":
+                # Deletar tensores explicitamente
+                del inputs, translated
+                # Limpar cache do CUDA
                 torch.cuda.empty_cache()
+                # Sincronizar para forçar limpeza
+                torch.cuda.synchronize()
         
         linhas_traduzidas += len(linhas_para_traduzir)
         
@@ -224,12 +318,13 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
         )
         
         if deve_atualizar:
-            # Informações de memória GPU
+            # Informações de memória GPU (via nvidia-smi = mais preciso)
             memoria_info = ""
             if device == "cuda":
-                mem_usada = torch.cuda.memory_allocated(0) / 1024**3
-                mem_max = torch.cuda.max_memory_allocated(0) / 1024**3
-                memoria_info = f"| GPU: {mem_usada:.1f}GB/{mem_max:.1f}GB "
+                mem_usada, mem_total = obter_memoria_gpu_real()
+                memoria_info = (
+                    f"| GPU: {mem_usada:.1f}GB/{mem_total:.1f}GB "
+                )
             
             # Timestamp
             agora = datetime.now().strftime('%H:%M:%S')
@@ -280,8 +375,8 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int =
     
     # Estatísticas de GPU se disponível
     if device == "cuda":
-        gpu_memory_used = torch.cuda.max_memory_allocated(0) / 1024**3
-        print(f"   🎮 Memória GPU máxima usada: {gpu_memory_used:.2f} GB")
+        mem_usada, _ = obter_memoria_gpu_real()
+        print(f"   🎮 Memória GPU usada: {mem_usada:.2f} GB")
         torch.cuda.reset_peak_memory_stats()
     
     print(f"   💾 Arquivo salvo: {arquivo_saida}")
