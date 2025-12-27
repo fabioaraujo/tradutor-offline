@@ -53,6 +53,19 @@ Isso irá traduzir o arquivo `texto.txt` e criar `texto_traduzido.txt` com a tra
 uv run tradutor.py arquivo_entrada.txt arquivo_saida.txt
 ```
 
+### Ajustar tamanho do lote manualmente
+
+```bash
+uv run tradutor.py texto.txt texto_traduzido.txt 64
+```
+
+O batch size é ajustado automaticamente baseado na memória da GPU:
+- GPU com 12GB+: batch_size = 64
+- GPU com 8-12GB: batch_size = 48  
+- GPU com 6-8GB: batch_size = 32
+- GPU com <6GB: batch_size = 16
+- CPU: batch_size = 32
+
 ## Como funciona
 
 O script usa o modelo `unicamp-dl/translation-en-pt-t5` da Hugging Face, que é um modelo T5 treinado especificamente para inglês → português.

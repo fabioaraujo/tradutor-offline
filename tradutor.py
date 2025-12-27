@@ -3,6 +3,7 @@ Tradutor de inglês para português usando Transformers
 """
 import torch
 import time
+import sys
 from datetime import datetime
 
 
@@ -16,14 +17,14 @@ def imprimir_barra_progresso(atual, total, largura=50, info_extra=""):
     print(f"\r[{barra}] {percentual:.1f}% ({atual}/{total}) {info_extra}", end="", flush=True)
 
 
-def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int = 8):
+def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, max_tokens: int = 2048):
     """
     Traduz um arquivo de texto de inglês para português.
     
     Args:
         arquivo_entrada: Caminho do arquivo em inglês
         arquivo_saida: Caminho do arquivo de saída em português
-        batch_size: Tamanho do lote para processamento
+        max_tokens: Número máximo de tokens por lote (padrão: 2048)
     """
     tempo_inicio = time.time()
     
@@ -73,7 +74,10 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int =
         
         # Otimizações para GPU
         torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         model = model.to(device)
+        model.eval()  # Modo de inferência
         
         # Limpar cache da GPU
         torch.cuda.empty_cache()
@@ -97,31 +101,66 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int =
     print(f"   Linhas com texto: {linhas_nao_vazias}")
     print(f"   Linhas vazias: {len(linhas) - linhas_nao_vazias}\n")
     
-    # Traduzir em lotes
+    # Traduzir em lotes dinâmicos baseados em tokens
     print("🔄 Iniciando tradução...")
-    print(f"   Tamanho do lote: {batch_size} linhas por vez\n")
+    print(f"   Agrupando linhas dinamicamente (max {max_tokens} tokens)\n")
     
-    traducoes = []
-    total_batches = (len(linhas) + batch_size - 1) // batch_size
     linhas_traduzidas = 0
     tempo_traducao_inicio = time.time()
     
-    for i in range(0, len(linhas), batch_size):
-        batch = linhas[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        tempo_batch_inicio = time.time()
-        
-        # Filtrar linhas vazias para tradução
-        linhas_para_traduzir = []
-        indices_vazios = []
-        
-        for idx, linha in enumerate(batch):
-            linha_limpa = linha.strip()
-            if linha_limpa:
-                linhas_para_traduzir.append(linha_limpa)
+    # Criar lotes dinâmicos baseados em número de caracteres/tokens
+    lotes = []
+    lote_atual = []
+    lote_indices = []
+    tamanho_lote_atual = 0
+    
+    for i, linha in enumerate(linhas):
+        linha_limpa = linha.strip()
+        if linha_limpa:
+            # Estimar tokens (~4 chars por token em média)
+            tokens_estimados = len(linha_limpa) // 4
+            
+            # Se adicionar essa linha ultrapassar o limite, fechar lote atual
+            if lote_atual and (tamanho_lote_atual + tokens_estimados > max_tokens):
+                lotes.append((lote_atual[:], lote_indices[:]))
+                lote_atual = [linha_limpa]
+                lote_indices = [i]
+                tamanho_lote_atual = tokens_estimados
             else:
-                indices_vazios.append(idx)
-        
+                lote_atual.append(linha_limpa)
+                lote_indices.append(i)
+                tamanho_lote_atual += tokens_estimados
+        else:
+            # Linha vazia - adicionar ao lote como marcador
+            if lote_atual:
+                lotes.append((lote_atual[:], lote_indices[:]))
+                lote_atual = []
+                lote_indices = []
+                tamanho_lote_atual = 0
+    
+    # Adicionar último lote se houver
+    if lote_atual:
+        lotes.append((lote_atual, lote_indices))
+    
+    total_batches = len(lotes)
+    print(f"   📦 Total de lotes criados: {total_batches}")
+    print(f"   📊 Média de linhas por lote: {len(linhas) / total_batches:.1f}\n")
+    
+    # Processar cada lote
+    resultado_ordenado = {}
+    ultimo_update = time.time()
+    update_interval = 10  # Atualizar a cada 10 segundos no máximo
+    
+    # Mostrar barra de progresso inicial
+    agora_inicial = datetime.now().strftime('%H:%M:%S')
+    info_inicial = f"| Iniciando... | {agora_inicial}"
+    imprimir_barra_progresso(
+        0, linhas_nao_vazias, largura=40, info_extra=info_inicial
+    )
+    print()  # Nova linha para começar o progresso
+    sys.stdout.flush()  # Forçar exibição imediata
+    
+    for batch_num, (linhas_para_traduzir, indices) in enumerate(lotes, 1):
         # Traduzir linhas não vazias
         if linhas_para_traduzir:
             inputs = tokenizer(
@@ -138,19 +177,21 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int =
             with torch.no_grad():
                 # Usar mixed precision se GPU disponível
                 if device == "cuda":
-                    with torch.amp.autocast('cuda'):
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
                         translated = model.generate(
                             **inputs,
                             max_length=512,
-                            num_beams=4,
-                            early_stopping=True
+                            num_beams=1,  # Greedy decoding para máxima velocidade
+                            do_sample=False,
+                            use_cache=True
                         )
                 else:
                     translated = model.generate(
                         **inputs,
                         max_length=512,
-                        num_beams=4,
-                        early_stopping=True
+                        num_beams=1,
+                        do_sample=False,
+                        use_cache=True
                     )
             
             traducoes_batch = [
@@ -158,53 +199,73 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int =
                 for t in translated
             ]
             
+            # Armazenar traduções com seus índices originais
+            for idx_orig, traducao in zip(indices, traducoes_batch):
+                resultado_ordenado[idx_orig] = traducao
+            
             # Limpar cache da GPU após cada lote
             if device == "cuda":
                 torch.cuda.empty_cache()
-        else:
-            traducoes_batch = []
         
-        # Reconstruir o lote com linhas vazias nos lugares corretos
-        resultado_batch = []
-        traducao_idx = 0
-        
-        for idx in range(len(batch)):
-            if idx in indices_vazios:
-                resultado_batch.append('\n')
-            else:
-                resultado_batch.append(traducoes_batch[traducao_idx] + '\n')
-                traducao_idx += 1
-        
-        traducoes.extend(resultado_batch)
         linhas_traduzidas += len(linhas_para_traduzir)
         
         # Calcular estatísticas
-        tempo_batch = time.time() - tempo_batch_inicio
-        tempo_total_ate_agora = time.time() - tempo_traducao_inicio
+        tempo_atual = time.time()
+        tempo_total_ate_agora = tempo_atual - tempo_traducao_inicio
         velocidade = linhas_traduzidas / tempo_total_ate_agora
         linhas_restantes = linhas_nao_vazias - linhas_traduzidas
         tempo_estimado = linhas_restantes / velocidade if velocidade > 0 else 0
         
-        # Exibir progresso
-        info_extra = (
-            f"| Lote {batch_num}/{total_batches} "
-            f"| {velocidade:.1f} linhas/s "
-            f"| ETA: {tempo_estimado:.0f}s"
+        # Atualizar barra a cada 10 segundos ou no último lote
+        tempo_desde_update = tempo_atual - ultimo_update
+        deve_atualizar = (
+            tempo_desde_update >= update_interval or
+            batch_num == total_batches
         )
-        imprimir_barra_progresso(
-            linhas_traduzidas,
-            linhas_nao_vazias,
-            largura=40,
-            info_extra=info_extra
-        )
+        
+        if deve_atualizar:
+            # Informações de memória GPU
+            memoria_info = ""
+            if device == "cuda":
+                mem_usada = torch.cuda.memory_allocated(0) / 1024**3
+                mem_max = torch.cuda.max_memory_allocated(0) / 1024**3
+                memoria_info = f"| GPU: {mem_usada:.1f}GB/{mem_max:.1f}GB "
+            
+            # Timestamp
+            agora = datetime.now().strftime('%H:%M:%S')
+            
+            # Exibir progresso
+            info_extra = (
+                f"| {batch_num}/{total_batches} "
+                f"{memoria_info}"
+                f"| {velocidade:.1f} l/s "
+                f"| ETA: {tempo_estimado:.0f}s "
+                f"| {agora}"
+            )
+            imprimir_barra_progresso(
+                linhas_traduzidas,
+                linhas_nao_vazias,
+                largura=40,
+                info_extra=info_extra
+            )
+            ultimo_update = tempo_atual
     
     # Nova linha após a barra de progresso
     print("\n")
     
+    # Reconstruir arquivo na ordem original
+    print("📝 Reconstruindo arquivo traduzido...")
+    traducoes_finais = []
+    for i, linha in enumerate(linhas):
+        if i in resultado_ordenado:
+            traducoes_finais.append(resultado_ordenado[i] + '\n')
+        else:
+            traducoes_finais.append('\n')  # Linha vazia
+    
     # Salvar o resultado
     print("💾 Salvando tradução...")
     with open(arquivo_saida, 'w', encoding='utf-8') as f:
-        f.writelines(traducoes)
+        f.writelines(traducoes_finais)
     
     # Estatísticas finais
     tempo_total = time.time() - tempo_inicio
@@ -229,16 +290,36 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str, batch_size: int =
 
 
 if __name__ == "__main__":
-    import sys
-    
     # Configuração padrão
     arquivo_entrada = "texto.txt"
     arquivo_saida = "texto_traduzido.txt"
+    max_tokens = 2048  # Padrão
     
     # Permite passar argumentos pela linha de comando
     if len(sys.argv) > 1:
         arquivo_entrada = sys.argv[1]
     if len(sys.argv) > 2:
         arquivo_saida = sys.argv[2]
+    if len(sys.argv) > 3:
+        max_tokens = int(sys.argv[3])
     
-    traduzir_arquivo(arquivo_entrada, arquivo_saida)
+    # Ajustar max_tokens baseado na GPU disponível
+    if torch.cuda.is_available():
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        if gpu_memory > 11:  # GPU com ~12GB (RTX 4070, etc)
+            max_tokens = 1024  # Base para cálculo
+        elif gpu_memory >= 10:
+            max_tokens = 896
+        elif gpu_memory >= 8:
+            max_tokens = 768
+        elif gpu_memory >= 6:
+            max_tokens = 640
+        else:
+            max_tokens = 512
+            
+        # Otimização: lotes menores = melhor velocidade e menos uso de memória
+        max_tokens = max_tokens / 3  # RTX 4070: 256 tokens (~2+ linhas/s)
+        print(f"🎮 GPU com {gpu_memory:.1f}GB detectada")
+        print(f"📦 Configuração otimizada: {max_tokens} tokens/lote\n")
+    
+    traduzir_arquivo(arquivo_entrada, arquivo_saida, max_tokens=max_tokens)
