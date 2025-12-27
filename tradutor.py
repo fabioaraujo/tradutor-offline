@@ -411,9 +411,7 @@ if __name__ == "__main__":
             max_tokens = 640
         else:
             max_tokens = 512
-            
-        # Otimização: lotes menores = melhor velocidade e menos uso de memória
-        max_tokens = max_tokens / 3  # RTX 4070: 256 tokens (~2+ linhas/s)
+
         print(f"🎮 GPU com {gpu_memory:.1f}GB detectada")
         print(f"📦 Configuração otimizada: {max_tokens} tokens/lote\n")
     
