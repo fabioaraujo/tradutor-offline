@@ -38,7 +38,7 @@ env/
 Thumbs.db
 
 # Arquivos de tradução gerados
-texto_traduzido.txt
+*.txt
 
 # Cache de modelos (Hugging Face)
 .cache/
