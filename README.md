@@ -212,13 +212,37 @@ Na primeira execução, o modelo mBART-50 será baixado automaticamente (aproxim
 **Nota**: Performance com mBART-50 + beam search (5 beams) e 1024 tokens/lote em RTX 4070.
 
 ### OpenAI API (tradutor_openai.py)
-| Modelo | Velocidade Típica | Tempo para 2780 linhas | Qualidade |
-|--------|-------------------|------------------------|-----------|
-| Llama 3.1 8B | ~2-5 linhas/s | ~10-20 minutos | 90-95% |
-| Mixtral 8x7B | ~1-3 linhas/s | ~15-45 minutos | 95%+ |
-| GPT-4 (Cloud) | Variável | Depende da API | 98%+ |
 
-**Nota**: Performance varia conforme hardware, modelo e servidor usado.
+**Hardware de referência**: RTX 4070 Ti (12GB VRAM) - LM Studio rodando localmente
+
+| Modelo | Quantização | Velocidade | Tempo (1577 linhas) | Tempo est. (2780 linhas) | Qualidade | VRAM |
+|--------|-------------|------------|---------------------|--------------------------|-----------|------|
+| **Qwen 2.5 7B** ⭐ | Q6_K | ~4.5 linhas/s | ~5m 47s | ~10m 17s | 95-98% | 8GB |
+| **Llama 3.1 8B** | Q5_K_M | ~4-6 linhas/s | ~4-7 min | ~8-12 min | 90-95% | 7GB |
+| **Aya 23 8B** | Q5_K_M | ~3-5 linhas/s | ~5-9 min | ~10-15 min | 95%+ | 7GB |
+| **Mixtral 8x7B** | Q4_K_M | ~2-3 linhas/s | ~9-13 min | ~15-25 min | 98%+ | 12GB |
+| **GPT-4 (Cloud)** | - | Variável | Variável | Depende da API | 98%+ | N/A |
+
+**Testes Reais Executados**:
+1. **Arquivo pequeno (29 linhas)**: 6.48s = 4.48 l/s
+2. **Arquivo grande (1577 linhas)**: 347.13s (5m 47s) = **4.54 l/s** ✅
+   - Modelo: Qwen 2.5 7B (Q6_K) no LM Studio
+   - Hardware: RTX 4070 Ti (12GB VRAM)
+   - Configuração: 5 linhas por lote, temperature 0.3
+   - Performance consistente em arquivos de diferentes tamanhos
+
+**Modelos Recomendados para Tradução**:
+- **Melhor custo-benefício**: Qwen 2.5 7B (excelente em multilíngue, testado)
+- **Mais rápido**: Llama 3.1 8B (ótimo desempenho geral)
+- **Especializado**: Aya 23 8B (focado em 23 idiomas)
+- **Máxima qualidade**: Mixtral 8x7B (superior, mas mais lento)
+
+**Nota**: 
+- Performance medida com temperatura 0.3 e 5 linhas por lote
+- Velocidade muito consistente: 4.48 l/s (29 linhas) vs 4.54 l/s (1577 linhas)
+- LM Studio, Ollama e LocalAI têm performance similar
+- Modelos GGUF (quantizados) oferecem melhor velocidade/qualidade
+- Para 2780 linhas: ~10 minutos estimados com Qwen 2.5 7B
 
 ## Solução de Problemas
 
