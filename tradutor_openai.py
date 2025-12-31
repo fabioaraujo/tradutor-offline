@@ -288,7 +288,7 @@ def traduzir_arquivo(arquivo_entrada: str, arquivo_saida: str,
 if __name__ == "__main__":
     # Configuração padrão
     arquivo_entrada = "texto.txt"
-    arquivo_saida = "texto_traduzido.txt"
+    arquivo_saida = "texto_traduzido_openai.txt"
     api_url = "http://127.0.0.1:1234/v1"
     modelo = "local-model"
     linhas_por_lote = 5  # Reduzido para 5 para melhor precisão
